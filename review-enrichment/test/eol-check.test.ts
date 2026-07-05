@@ -317,3 +317,21 @@ test("extractVersionPins reads FROM pins from Dockerfile.prod", () => {
     { file: "Dockerfile.prod", product: "python", version: "3.8" },
   ]);
 });
+
+test("extractVersionPins maps database/cache base images to their endoflife.date slugs", () => {
+  // The official image name differs from the endoflife.date slug for postgres
+  // (postgresql) and mongo (mongodb), so these are genuine mappings, not just new keys.
+  const cases: Array<[string, string, string]> = [
+    ["FROM postgres:14", "postgresql", "14"],
+    ["FROM mysql:8.0", "mysql", "8.0"],
+    ["FROM mariadb:11", "mariadb", "11"],
+    ["FROM redis:7", "redis", "7"],
+    ["FROM mongo:5", "mongodb", "5"],
+  ];
+  for (const [from, product, version] of cases) {
+    const pins = extractVersionPins([added("Dockerfile", from)]);
+    const pin = pins.find((p) => p.product === product);
+    assert.ok(pin, `expected a ${product} pin from "${from}"`);
+    assert.equal(pin!.version, version);
+  }
+});

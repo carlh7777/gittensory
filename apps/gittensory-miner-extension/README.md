@@ -35,3 +35,16 @@ quota, instead of silently failing to save or leaving storage partially written.
 (#4860). Chrome match patterns cannot pin a port, so `http://localhost/*` is the narrowest grant the platform
 allows; `https` is intentionally omitted because the local miner-ui dev server is plain HTTP. This is the enabling
 permission for live-fetching ranked candidates from the local miner-ui instead of pasting them.
+
+## Tests & coverage
+
+`npm run test` (`vitest run --coverage`) runs the app-local suite in `test/` and enforces a v8 coverage floor
+(`vitest.config.ts`). It runs wherever `npm run ui:test` / `npm run test:ci` run — no separate CI step. Because
+these are classic (non-bundled) scripts, the tests import the real source files directly (with the source's own
+`globalThis.__GITTENSORY_MINER_EXTENSION_TEST__` internals hook) so coverage attributes to the files, which the
+repo's older `node:vm` harness could not do.
+
+Covered today (#4865): the pure state maps and the background service worker — `toolbar-badge.js`,
+`opportunity-badge.js`, and `background.js`. The two DOM-page scripts — `content.js` (issue-page content script)
+and `options.js` (options-page form) — need a jsdom mount harness and are a documented follow-up; the threshold is
+a real measured baseline (a regression floor), not a target, and should be raised per-PR as those get covered.

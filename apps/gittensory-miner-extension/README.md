@@ -35,3 +35,13 @@ quota, instead of silently failing to save or leaving storage partially written.
 (#4860). Chrome match patterns cannot pin a port, so `http://localhost/*` is the narrowest grant the platform
 allows; `https` is intentionally omitted because the local miner-ui dev server is plain HTTP. This is the enabling
 permission for live-fetching ranked candidates from the local miner-ui instead of pasting them.
+
+## Tests
+
+`npm run test` (Vitest + v8 coverage) covers every shipped script — `background.js`, `content.js`,
+`opportunity-badge.js`, `options.js`, and `toolbar-badge.js` (#4865). The two DOM-page scripts (`content.js`,
+`options.js`) run under jsdom via a per-file `// @vitest-environment jsdom` docblock; the rest run in Node. Each
+script exposes its otherwise-unexported internals on `globalThis` only when
+`globalThis.__GITTENSORY_MINER_EXTENSION_TEST__` is set (done in `test/setup.js`), so the suite imports the real
+source files directly and v8 attributes true coverage. The suite is wired into the repo's `npm run ui:test`, so it
+runs in CI alongside the other UI workspaces.

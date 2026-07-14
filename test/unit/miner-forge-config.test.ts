@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   DEFAULT_FORGE_CONFIG,
+  graphqlUrlFromApiBaseUrl,
   resolveForgeConfig,
 } from "../../packages/gittensory-miner/lib/forge-config.js";
 
@@ -56,5 +57,18 @@ describe("resolveForgeConfig (#4784)", () => {
     expect(Object.isFrozen(DEFAULT_FORGE_CONFIG)).toBe(true);
     resolveForgeConfig({ apiBaseUrl: "https://other.example" });
     expect(DEFAULT_FORGE_CONFIG.apiBaseUrl).toBe("https://api.github.com");
+  });
+});
+
+describe("graphqlUrlFromApiBaseUrl (#4784 follow-up)", () => {
+  it("derives github.com and GHE GraphQL endpoints from REST apiBaseUrl values", () => {
+    expect(graphqlUrlFromApiBaseUrl("https://api.github.com")).toBe("https://api.github.com/graphql");
+    expect(graphqlUrlFromApiBaseUrl("https://ghe.example.com/api/v3")).toBe("https://ghe.example.com/api/graphql");
+    expect(graphqlUrlFromApiBaseUrl("https://ghe.example.com/api/v3/")).toBe("https://ghe.example.com/api/graphql");
+  });
+
+  it("falls back to the github.com default when apiBaseUrl is blank", () => {
+    expect(graphqlUrlFromApiBaseUrl("")).toBe("https://api.github.com/graphql");
+    expect(graphqlUrlFromApiBaseUrl("   ")).toBe("https://api.github.com/graphql");
   });
 });

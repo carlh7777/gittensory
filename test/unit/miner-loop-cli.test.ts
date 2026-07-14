@@ -500,6 +500,9 @@ describe("runLoop (#5135)", () => {
     // REGRESSION (#5394): the real CI-status poll ran BEFORE the disposition poll, on the real submitted PR.
     expect(pollCheckRunsSpy).toHaveBeenCalledWith("acme/widgets", 123, expect.objectContaining({ githubToken: "ghp_loop_test" }));
 
+    const [, attemptOptions] = runAttemptSpy.mock.calls[0]!;
+    expect(attemptOptions).toEqual(expect.objectContaining({ apiBaseUrl: undefined, githubToken: "ghp_loop_test" }));
+
     const after = reopenAfterRun(paths);
 
     // recordPrOutcomeSnapshot (real, not mocked) actually persisted the merged decision to the shared ledger.
@@ -767,6 +770,47 @@ describe("runLoop (#5135)", () => {
     expect(printed.haltReason).toBe("max_cycles_reached");
     expect(printed.cycles.every((c: { outcome: string }) => c.outcome === "idle_queue_empty")).toBe(true);
     expect(printed.cycles).toHaveLength(3);
+  });
+
+  it("REGRESSION (#5563): forwards options.apiBaseUrl into runAttempt so loop cycles stay forge-consistent", async () => {
+    const { eventLedger, governorLedger, portfolioQueue, runState, governorState } = tempStores();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const customForge = "https://ghe.example.com/api/v3";
+    portfolioQueue.enqueue({ repoFullName: "acme/widgets", identifier: "issue:7", apiBaseUrl: customForge });
+    const runDiscoverSpy = vi.fn();
+    const runAttemptSpy = vi.fn(async (_args: string[], options?: Record<string, unknown>) => {
+      (options?.onResult as ((result: unknown) => void) | undefined)?.({
+        outcome: "attempt_abandon",
+        repoFullName: "acme/widgets",
+        issueNumber: 7,
+        minerLogin: "alice",
+        base: "main",
+        mode: "dry_run",
+        attemptId: "loop-attempt-1",
+        submissionMode: "observe",
+        totalTurnsUsed: 0,
+        totalCostUsd: 0,
+        iterationsUsed: 0,
+      });
+      return 7;
+    });
+
+    await runLoop(["acme/widgets", "--miner-login", "alice", "--max-cycles", "1"], {
+      env: { GITHUB_TOKEN: "ghp_loop_test" },
+      apiBaseUrl: customForge,
+      openGovernorState: () => governorState,
+      initEventLedger: () => eventLedger,
+      initGovernorLedger: () => governorLedger,
+      initPortfolioQueue: () => portfolioQueue,
+      initRunStateStore: () => runState,
+      runDiscover: runDiscoverSpy,
+      runAttempt: runAttemptSpy,
+      ...readyLoopOptions(),
+    });
+
+    expect(runAttemptSpy).toHaveBeenCalledTimes(1);
+    const [, attemptOptions] = runAttemptSpy.mock.calls[0]!;
+    expect(attemptOptions).toEqual(expect.objectContaining({ apiBaseUrl: customForge, githubToken: "ghp_loop_test" }));
   });
 
   it("closes every store it opened, even when an unexpected error is thrown mid-cycle", async () => {

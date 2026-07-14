@@ -35,3 +35,11 @@ export function resolveForgeConfig(overrides = {}) {
   }
   return resolved;
 }
+
+/** Derive a GitHub GraphQL endpoint from a REST `apiBaseUrl` (github.com or GHE `/api/v3`). */
+export function graphqlUrlFromApiBaseUrl(apiBaseUrl) {
+  const trimmed = typeof apiBaseUrl === "string" ? apiBaseUrl.trim().replace(/\/$/, "") : "";
+  if (!trimmed) return `${DEFAULT_FORGE_CONFIG.apiBaseUrl}/graphql`;
+  if (trimmed.endsWith("/v3")) return `${trimmed.slice(0, -"/v3".length)}/graphql`;
+  return `${trimmed}/graphql`;
+}

@@ -15,3 +15,6 @@ export type ForgeConfig = {
 export const DEFAULT_FORGE_CONFIG: Readonly<ForgeConfig>;
 
 export function resolveForgeConfig(overrides?: Partial<ForgeConfig>): ForgeConfig;
+
+/** Derive a GitHub GraphQL endpoint from a REST `apiBaseUrl` (github.com or GHE `/api/v3`). */
+export function graphqlUrlFromApiBaseUrl(apiBaseUrl: string): string;

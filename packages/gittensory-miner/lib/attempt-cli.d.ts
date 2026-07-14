@@ -15,6 +15,8 @@ import type { resolveMinerGoalSpec } from "./miner-goal-spec.js";
 import type { ClaimConflictResult, resolveClaimConflict } from "./claim-conflict-resolver.js";
 import type { recordOwnSubmission } from "./governor-state.js";
 import type { getAttemptHistory } from "./portfolio-queue.js";
+import type { loadReputationHistory } from "./governor-state.js";
+import type { ForgeConfig } from "./forge-config.js";
 
 type CommonAttemptResultFields = {
   repoFullName: string;
@@ -63,6 +65,8 @@ export type ParsedAttemptArgs =
       live: boolean;
       dryRun: boolean;
       json: boolean;
+      apiBaseUrl?: string;
+      tokenEnv?: string;
     };
 
 export function parseAttemptArgs(args: string[]): ParsedAttemptArgs;
@@ -70,12 +74,17 @@ export function parseAttemptArgs(args: string[]): ParsedAttemptArgs;
 export function buildAttemptDeps(
   env: Record<string, string | undefined>,
   ledgers: { claimLedger: ClaimLedger; eventLedger: EventLedger; attemptLog: AttemptLog; governorLedger: GovernorLedger; nowMs: number },
+  fetchOptions?: { githubToken?: string; graphqlUrl?: string },
 ): AttemptDeps;
 
 export type RunAttemptOptions = {
   env?: Record<string, string | undefined>;
   nowMs?: number;
   attemptId?: string;
+  apiBaseUrl?: string;
+  tokenEnv?: string;
+  githubToken?: string;
+  forge?: Partial<ForgeConfig>;
   resolveCodingAgentModeFromConfig?: (config: { env?: Record<string, string | undefined> }) => CodingAgentExecutionMode;
   openWorktreeAllocator?: () => WorktreeAllocator;
   openClaimLedger?: () => ClaimLedger;
@@ -96,6 +105,7 @@ export type RunAttemptOptions = {
   resolveClaimConflict?: typeof resolveClaimConflict;
   recordOwnSubmission?: typeof recordOwnSubmission;
   getAttemptHistory?: typeof getAttemptHistory;
+  loadReputationHistory?: typeof loadReputationHistory;
   /** Invoked with the real structured result at every return point, in addition to (never instead of) the
    *  plain exit-code return -- the loop orchestrator's real hook into what actually happened. */
   onResult?: (result: AttemptCliResult) => void;

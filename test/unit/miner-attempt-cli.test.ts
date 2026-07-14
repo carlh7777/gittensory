@@ -16,6 +16,7 @@ import { closeDefaultWorktreeAllocator, openWorktreeAllocator } from "../../pack
 import { closeDefaultPortfolioQueueStore } from "../../packages/gittensory-miner/lib/portfolio-queue.js";
 import { closeDefaultGovernorState } from "../../packages/gittensory-miner/lib/governor-state.js";
 import { buildAttemptDeps, parseAttemptArgs, runAttempt } from "../../packages/gittensory-miner/lib/attempt-cli.js";
+import * as liveIssueSnapshot from "../../packages/gittensory-miner/lib/live-issue-snapshot.js";
 import type { PrepareAttemptWorktreeResult } from "../../packages/gittensory-miner/lib/attempt-worktree.js";
 import { DEFAULT_AMS_POLICY_SPEC, DEFAULT_MINER_GOAL_SPEC, parseFocusManifest } from "../../packages/gittensory-engine/src/index";
 
@@ -188,6 +189,32 @@ describe("parseAttemptArgs (#5132)", () => {
       error: "Unknown option: --verbose",
     });
   });
+
+  it("parseAttemptArgs accepts --api-base-url and --token-env (#4784 follow-up)", () => {
+    expect(parseAttemptArgs(["acme/widgets", "7", "--miner-login", "alice", "--api-base-url", "https://ghe.example.com/api/v3"])).toEqual({
+      repoFullName: "acme/widgets",
+      issueNumber: 7,
+      minerLogin: "alice",
+      base: "main",
+      live: false,
+      dryRun: false,
+      json: false,
+      apiBaseUrl: "https://ghe.example.com/api/v3",
+    });
+    expect(parseAttemptArgs(["acme/widgets", "7", "--miner-login", "alice", "--token-env", "FORGE_PAT"])).toEqual({
+      repoFullName: "acme/widgets",
+      issueNumber: 7,
+      minerLogin: "alice",
+      base: "main",
+      live: false,
+      dryRun: false,
+      json: false,
+      tokenEnv: "FORGE_PAT",
+    });
+    expect(parseAttemptArgs(["acme/widgets", "7", "--miner-login", "alice", "--api-base-url"])).toEqual({
+      error: expect.stringContaining("Usage: gittensory-miner attempt"),
+    });
+  });
 });
 
 describe("buildAttemptDeps (#5132)", () => {
@@ -238,6 +265,23 @@ describe("buildAttemptDeps (#5132)", () => {
     expect(() => buildAttemptDeps({}, { claimLedger, eventLedger, attemptLog, governorLedger, nowMs: 1 })).toThrow(
       /unconfigured_coding_agent_driver/,
     );
+  });
+
+  it("threads fetchOptions.githubToken and graphqlUrl into fetchLiveIssueSnapshot (#4784 follow-up)", async () => {
+    const { allocator, claimLedger, eventLedger, attemptLog, governorLedger } = tempLedgers();
+    closeables.push(allocator, claimLedger, eventLedger, attemptLog, governorLedger);
+    const fetchLiveIssueSnapshotSpy = vi.spyOn(liveIssueSnapshot, "fetchLiveIssueSnapshot").mockResolvedValue(null);
+    const deps = buildAttemptDeps(
+      { MINER_CODING_AGENT_PROVIDER: "noop" },
+      { claimLedger, eventLedger, attemptLog, governorLedger, nowMs: 1 },
+      { githubToken: "ghp_test", graphqlUrl: "https://ghe.example.com/api/graphql" },
+    );
+    await deps.fetchLiveIssueSnapshot("acme/widgets", 7);
+    expect(fetchLiveIssueSnapshotSpy).toHaveBeenCalledWith("acme/widgets", 7, {
+      githubToken: "ghp_test",
+      graphqlUrl: "https://ghe.example.com/api/graphql",
+    });
+    fetchLiveIssueSnapshotSpy.mockRestore();
   });
 });
 
@@ -604,9 +648,52 @@ describe("runAttempt (#5132)", () => {
       ...readyPipelineOptions({ getAttemptHistory: getAttemptHistorySpy, runMinerAttempt: runMinerAttemptSpy }),
     });
 
-    expect(getAttemptHistorySpy).toHaveBeenCalledWith("acme/widgets", "issue:42");
+    expect(getAttemptHistorySpy).toHaveBeenCalledWith("acme/widgets", "issue:42", undefined);
     const [input] = runMinerAttemptSpy.mock.calls[0]!;
     expect(input.governor.convergenceInput).toEqual(realHistory);
+  });
+
+  it("REGRESSION (#5563): --api-base-url threads the custom forge host through portfolio-queue, reputation, and claim reads/writes", async () => {
+    const { allocator, claimLedger, eventLedger, attemptLog, governorLedger } = tempLedgers();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const customForge = "https://ghe.example.com/api/v3";
+    const getAttemptHistorySpy = vi.fn().mockReturnValue({ attempts: 1, consecutiveFailures: 0, reenqueues: 0, reachedDone: false });
+    const loadReputationHistorySpy = vi.fn().mockReturnValue({ decided: 2, unfavorable: 1 });
+    const claimIssueSpy = vi.spyOn(claimLedger, "claimIssue");
+    const releaseClaimSpy = vi.spyOn(claimLedger, "releaseClaim");
+    const fetchSelfReviewContextSpy = vi.fn().mockResolvedValue(fakeReviewContext());
+    const runMinerAttemptSpy = vi.fn().mockResolvedValue({
+      outcome: "abandon",
+      loopResult: fakeLoopResult({ outcome: "abandon" }),
+    });
+
+    await runAttempt(
+      ["acme/widgets", "42", "--miner-login", "alice", "--api-base-url", customForge, "--token-env", "FORGE_PAT", "--json"],
+      {
+        env: { MINER_CODING_AGENT_PROVIDER: "noop", FORGE_PAT: "ghp_custom" },
+      openWorktreeAllocator: () => allocator,
+      openClaimLedger: () => claimLedger,
+      initEventLedger: () => eventLedger,
+      initAttemptLog: () => attemptLog,
+      initGovernorLedger: () => governorLedger,
+      ...readyPipelineOptions({
+        getAttemptHistory: getAttemptHistorySpy,
+        loadReputationHistory: loadReputationHistorySpy,
+        fetchSelfReviewContext: fetchSelfReviewContextSpy,
+        runMinerAttempt: runMinerAttemptSpy,
+      }),
+    });
+
+    expect(getAttemptHistorySpy).toHaveBeenCalledWith("acme/widgets", "issue:42", customForge);
+    expect(loadReputationHistorySpy).toHaveBeenCalledWith("acme/widgets", customForge);
+    expect(claimIssueSpy).toHaveBeenCalledWith("acme/widgets", 42, expect.stringMatching(/^attempt:/), customForge);
+    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 42, customForge);
+    expect(fetchSelfReviewContextSpy).toHaveBeenCalledWith(
+      "acme/widgets",
+      expect.objectContaining({ apiBaseUrl: customForge, githubToken: "ghp_custom" }),
+    );
+    const [input] = runMinerAttemptSpy.mock.calls[0]!;
+    expect(input.governor.reputationHistory).toEqual({ decided: 2, unfavorable: 1 });
   });
 
   it("REGRESSION (#5654): when options.getAttemptHistory is omitted, runAttempt falls back to the REAL portfolio-queue.js default, not a fabricated result", async () => {
@@ -1199,6 +1286,7 @@ describe("runAttempt (#5132)", () => {
     });
 
     expect(fetchSelfReviewContextSpy).toHaveBeenCalledWith("acme/widgets", {
+      apiBaseUrl: "https://api.github.com",
       githubToken: "ghp_test",
       contributorLogin: "alice",
       linkedIssues: [7],
@@ -1365,7 +1453,7 @@ describe("runAttempt: real claim-ledger wiring (#5393)", () => {
     expect(activeClaimsDuringAttempt).toHaveLength(1);
     expect(activeClaimsDuringAttempt[0]).toMatchObject({ repoFullName: "acme/widgets", issueNumber: 7, status: "active" });
     // ...and released once the attempt concluded.
-    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7);
+    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7, undefined);
   });
 
   it("releases the real claim even on a non-submitted terminal outcome", async () => {
@@ -1383,7 +1471,7 @@ describe("runAttempt: real claim-ledger wiring (#5393)", () => {
       ...readyPipelineOptions({ runMinerAttempt: async () => ({ outcome: "abandon", loopResult: fakeLoopResult() }) }),
     });
 
-    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7);
+    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7, undefined);
   });
 
   it("REGRESSION: releases the real claim even when runMinerAttempt throws unexpectedly", async () => {
@@ -1406,7 +1494,7 @@ describe("runAttempt: real claim-ledger wiring (#5393)", () => {
     });
 
     expect(exitCode).toBe(2);
-    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7);
+    expect(releaseClaimSpy).toHaveBeenCalledWith("acme/widgets", 7, undefined);
   });
 
   it("never claims when the attempt is blocked before feasibility is even checked (rejection-signaled)", async () => {

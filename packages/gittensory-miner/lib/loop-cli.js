@@ -385,6 +385,9 @@ export async function runLoop(args, options = {}) {
       await runAttemptFn(attemptArgv, {
         ...(options.attemptOptions ?? {}),
         env,
+        apiBaseUrl: options.apiBaseUrl,
+        tokenEnv: options.tokenEnv,
+        githubToken,
         onResult: (result) => {
           lastResult = result;
         },

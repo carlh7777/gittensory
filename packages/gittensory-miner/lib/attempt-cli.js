@@ -8,12 +8,11 @@
 // claim-conflict resolution (#4848, claim-conflict-resolver.js) for the narrow race window
 // checkSubmissionFreshness cannot see (two miners submitting almost simultaneously).
 //
-// KNOWN, DOCUMENTED GAPS (not fabricated -- see attempt-input-builder.js's own header for the full list):
-// governor.selfPlagiarismCandidate/selfPlagiarismRecentSubmissions are omitted (chokepoint.ts's own design treats
-// that as "skip that stage entirely"). governor.convergenceInput is now a real per-issue portfolio-queue.js read
-// (#5654) and governor.reputationHistory a real per-repo governor-state.js read (#5675), not placeholders.
+// governor.selfPlagiarismCandidate/selfPlagiarismRecentSubmissions are late-augmented inside attempt-runner.js
+// (#5676), not in the early buildAttemptGovernorContext snapshot -- see attempt-input-builder.js's header.
 
 import { fingerprintFromChangedFiles, resolveCodingAgentModeFromConfig, resolveFirstConfiguredCodingAgentDriverName } from "@loopover/engine";
+import { graphqlUrlFromApiBaseUrl, resolveForgeConfig } from "./forge-config.js";
 import { argsWantJson, describeCliError, reportCliFailure } from "./cli-error.js";
 import { constructProductionCodingAgentDriver } from "./coding-agent-construction.js";
 import { runSlopAssessment } from "./slop-assessment.js";
@@ -39,7 +38,7 @@ import { loadReputationHistory, recordOwnSubmission } from "./governor-state.js"
 import { runMinerAttempt } from "./attempt-runner.js";
 
 const ATTEMPT_USAGE =
-  "Usage: gittensory-miner attempt <owner/repo> <issue#> --miner-login <login> [--base <branch>] [--live] [--dry-run] [--json]";
+  "Usage: gittensory-miner attempt <owner/repo> <issue#> --miner-login <login> [--base <branch>] [--live] [--dry-run] [--json] [--api-base-url <url>] [--token-env <VAR>]";
 
 function parseRepoTarget(value) {
   const trimmed = typeof value === "string" ? value.trim() : "";
@@ -49,7 +48,7 @@ function parseRepoTarget(value) {
 }
 
 export function parseAttemptArgs(args) {
-  const options = { json: false, minerLogin: null, base: "main", live: false, dryRun: false };
+  const options = { json: false, minerLogin: null, base: "main", live: false, dryRun: false, apiBaseUrl: null, tokenEnv: null };
   const positional = [];
 
   for (let index = 0; index < args.length; index += 1) {
@@ -87,6 +86,20 @@ export function parseAttemptArgs(args) {
       index += 1;
       continue;
     }
+    if (token === "--api-base-url") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) return { error: ATTEMPT_USAGE };
+      options.apiBaseUrl = value;
+      index += 1;
+      continue;
+    }
+    if (token === "--token-env") {
+      const value = args[index + 1];
+      if (!value || value.startsWith("-")) return { error: ATTEMPT_USAGE };
+      options.tokenEnv = value;
+      index += 1;
+      continue;
+    }
     if (token.startsWith("-")) return { error: `Unknown option: ${token}` };
     positional.push(token);
   }
@@ -108,6 +121,8 @@ export function parseAttemptArgs(args) {
     live: options.live,
     dryRun: options.dryRun,
     json: options.json,
+    ...(options.apiBaseUrl !== null ? { apiBaseUrl: options.apiBaseUrl } : {}),
+    ...(options.tokenEnv !== null ? { tokenEnv: options.tokenEnv } : {}),
   };
 }
 
@@ -126,15 +141,20 @@ export function parseAttemptArgs(args) {
  *   governorLedger: import("./governor-ledger.js").GovernorLedger,
  *   nowMs: number,
  * }} ledgers
+ * @param {{ githubToken?: string, graphqlUrl?: string }} [fetchOptions]
  * @returns {import("./attempt-runner.js").AttemptDeps}
  */
-export function buildAttemptDeps(env, ledgers) {
+export function buildAttemptDeps(env, ledgers, fetchOptions = {}) {
+  const githubToken = fetchOptions.githubToken ?? env.GITHUB_TOKEN ?? "";
+  const graphqlUrl =
+    typeof fetchOptions.graphqlUrl === "string" && fetchOptions.graphqlUrl.trim() ? fetchOptions.graphqlUrl.trim() : undefined;
   return {
     driver: constructProductionCodingAgentDriver(env),
     runSlopAssessment: (input) => runSlopAssessment(input),
     appendAttemptLogEvent: (event) => ledgers.attemptLog.appendAttemptLogEvent(event),
     claimLedger: ledgers.claimLedger,
-    fetchLiveIssueSnapshot: (repoFullName, issueNumber) => fetchLiveIssueSnapshot(repoFullName, issueNumber, { githubToken: env.GITHUB_TOKEN }),
+    fetchLiveIssueSnapshot: (repoFullName, issueNumber) =>
+      fetchLiveIssueSnapshot(repoFullName, issueNumber, { githubToken, ...(graphqlUrl ? { graphqlUrl } : {}) }),
     eventLedger: ledgers.eventLedger,
     governorLedgerAppend: (event) => ledgers.governorLedger.appendGovernorEvent(event),
     nowMs: ledgers.nowMs,
@@ -158,6 +178,18 @@ export async function runAttempt(args, options = {}) {
 
   const env = options.env ?? process.env;
   const nowMs = options.nowMs ?? Date.now();
+  const forge = resolveForgeConfig({
+    ...(options.forge ?? {}),
+    ...(parsed.apiBaseUrl !== undefined ? { apiBaseUrl: parsed.apiBaseUrl } : {}),
+    ...(options.apiBaseUrl !== undefined ? { apiBaseUrl: options.apiBaseUrl } : {}),
+    ...(parsed.tokenEnv !== undefined || options.tokenEnv !== undefined
+      ? { tokenEnvVar: options.tokenEnv ?? parsed.tokenEnv }
+      : {}),
+  });
+  const tokenEnv = parsed.tokenEnv ?? options.tokenEnv ?? forge.tokenEnvVar;
+  const githubToken = options.githubToken ?? env[tokenEnv] ?? "";
+  const apiBaseUrl = parsed.apiBaseUrl ?? options.apiBaseUrl;
+  const graphqlUrl = graphqlUrlFromApiBaseUrl(forge.apiBaseUrl);
   const resolveMode = options.resolveCodingAgentModeFromConfig ?? resolveCodingAgentModeFromConfig;
   const mode = resolveMode({ env, agentDryRun: !parsed.live });
 
@@ -258,7 +290,7 @@ export async function runAttempt(args, options = {}) {
     let deps;
     try {
       const buildDeps = options.buildAttemptDeps ?? buildAttemptDeps;
-      deps = buildDeps(env, { claimLedger, eventLedger, attemptLog, governorLedger, nowMs });
+      deps = buildDeps(env, { claimLedger, eventLedger, attemptLog, governorLedger, nowMs }, { githubToken, graphqlUrl });
     } catch (error) {
       const reason = describeCliError(error);
       return reportCliFailure(
@@ -312,7 +344,8 @@ export async function runAttempt(args, options = {}) {
     // Real SelfReviewContext (#5145): issue/PR/manifest data at live-gate fidelity for the target repo.
     const fetchReviewContext = options.fetchSelfReviewContext ?? fetchSelfReviewContext;
     const reviewContext = await fetchReviewContext(parsed.repoFullName, {
-      githubToken: env.GITHUB_TOKEN,
+      githubToken,
+      apiBaseUrl: forge.apiBaseUrl,
       contributorLogin: parsed.minerLogin,
       linkedIssues: [parsed.issueNumber],
     });
@@ -404,15 +437,14 @@ export async function runAttempt(args, options = {}) {
     });
 
     // Real per-issue attempt history (#5654): portfolio-queue.js's own claim/reclaim/requeue/done counters,
-    // keyed the same way opportunity-fanout.js enqueues issue-shaped candidates (`issue:<number>`). No
-    // apiBaseUrl: this file has no multi-forge host context of its own today, so this reads (and every
-    // pre-#5563 single-forge caller already reads) the github.com default.
+    // keyed the same way opportunity-fanout.js enqueues issue-shaped candidates (`issue:<number>`). Forge-
+    // scoped by apiBaseUrl (#5563) so two hosts serving a same-named owner/repo never share one counter row.
     const readAttemptHistory = options.getAttemptHistory ?? getAttemptHistory;
-    const convergenceInput = readAttemptHistory(parsed.repoFullName, `issue:${parsed.issueNumber}`);
+    const convergenceInput = readAttemptHistory(parsed.repoFullName, `issue:${parsed.issueNumber}`, apiBaseUrl);
     // Real per-repo reputation history (#5675): the miner's own decided/unfavorable outcome streak for this repo,
     // read from governor-state.js so the chokepoint's self-reputation throttle sees real data instead of nothing.
     const readReputationHistory = options.loadReputationHistory ?? loadReputationHistory;
-    const reputationHistory = readReputationHistory(parsed.repoFullName);
+    const reputationHistory = readReputationHistory(parsed.repoFullName, apiBaseUrl);
     const governor = buildAttemptGovernorContext(env, amsPolicy.spec, repoPaused, convergenceInput, reputationHistory);
 
     // Real soft-claim (#5393): recorded once we've committed to a real attempt (past feasibility), so a
@@ -420,7 +452,7 @@ export async function runAttempt(args, options = {}) {
     // attempt is in flight. Released in `finally` on every terminal outcome -- mirrors the worktree
     // allocation slot's own acquire-then-always-release pattern below. The real claimedAt this returns is
     // ALSO this miner's own claim-time for the post-submission conflict check further down (#4848).
-    const claimRecord = claimLedger.claimIssue(parsed.repoFullName, parsed.issueNumber, `attempt:${attemptId}`);
+    const claimRecord = claimLedger.claimIssue(parsed.repoFullName, parsed.issueNumber, `attempt:${attemptId}`, apiBaseUrl);
     claimedIssue = true;
 
     const runAttemptPipeline = options.runMinerAttempt ?? runMinerAttempt;
@@ -578,7 +610,7 @@ export async function runAttempt(args, options = {}) {
     // Every terminal outcome past the claim point (submitted/abandon/stale/blocked/governed, or an
     // unexpected throw) releases the soft-claim -- a claim that outlives its own attempt process would
     // wrongly tell a sibling miner this issue is still in flight.
-    if (claimedIssue && claimLedger) claimLedger.releaseClaim(parsed.repoFullName, parsed.issueNumber);
+    if (claimedIssue && claimLedger) claimLedger.releaseClaim(parsed.repoFullName, parsed.issueNumber, apiBaseUrl);
     if (allocation && allocator) allocator.release(attemptId);
     allocator?.close();
     claimLedger?.close();
